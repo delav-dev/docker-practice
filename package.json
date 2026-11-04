@@ -1,0 +1,17 @@
+{
+  "name": "app-tareas-docker",
+  "version": "1.0.0",
+  "description": "Aplicación web de ejemplo (lista de tareas) para el proyecto de Docker - Sistemas Operativos",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pg": "^8.11.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

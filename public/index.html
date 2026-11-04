@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tareas · Proyecto Docker</title>
+<style>
+  :root {
+    --papel: #eef2f4;
+    --tarjeta: #ffffff;
+    --tinta: #15232d;
+    --tinta-suave: #5a6b77;
+    --linea: #d3dce1;
+    --acento: #0b7a86;
+    --acento-osc: #085f69;
+    --hecho: #8a9aa5;
+    --error: #b4321c;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--papel); color: var(--tinta); font: 16px/1.5 var(--sans); }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 1.75rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { margin: 0 0 24px; color: var(--tinta-suave); }
+
+  /* Barra del contenedor: lo más característico del proyecto */
+  .contenedor {
+    background: var(--tinta); color: #dbe7ee; border-radius: 6px;
+    padding: 14px 16px; margin-bottom: 28px; font-family: var(--mono); font-size: .85rem;
+    display: grid; grid-template-columns: auto 1fr; gap: 4px 16px;
+  }
+  .contenedor dt { color: #8fa6b4; }
+  .contenedor dd { margin: 0; word-break: break-all; }
+
+  form { display: flex; gap: 8px; margin-bottom: 16px; }
+  input[type=text] {
+    flex: 1; padding: 11px 12px; font: inherit; color: inherit;
+    border: 1px solid var(--linea); border-radius: 6px; background: var(--tarjeta);
+  }
+  button { font: inherit; cursor: pointer; border-radius: 6px; }
+  .primario { padding: 11px 18px; border: 0; background: var(--acento); color: #fff; font-weight: 600; }
+  .primario:hover { background: var(--acento-osc); }
+  :focus-visible { outline: 3px solid #f0a53a; outline-offset: 2px; }
+
+  ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--linea); }
+  li { display: flex; align-items: center; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--linea); }
+  li input { width: 20px; height: 20px; accent-color: var(--acento); flex: none; }
+  li span { flex: 1; overflow-wrap: anywhere; }
+  li.hecha span { color: var(--hecho); text-decoration: line-through; }
+  .borrar { border: 0; background: none; color: var(--tinta-suave); padding: 6px 10px; }
+  .borrar:hover { color: var(--error); }
+
+  .vacio, .mensaje { color: var(--tinta-suave); padding: 18px 4px; }
+  .mensaje.error { color: var(--error); }
+  @media (prefers-reduced-motion: no-preference) { button { transition: background .15s, color .15s; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lista de tareas</h1>
+  <p class="sub">Aplicación de ejemplo para el taller de Docker.</p>
+
+  <dl class="contenedor" id="info" aria-label="Información del servidor">
+    <dt>hostname</dt><dd id="i-host">cargando…</dd>
+    <dt>almacenamiento</dt><dd id="i-alm">—</dd>
+    <dt>node</dt><dd id="i-node">—</dd>
+    <dt>visto vía</dt><dd id="i-via">—</dd>
+  </dl>
+
+  <form id="form">
+    <input type="text" id="titulo" placeholder="Escribe una tarea" maxlength="200" required aria-label="Nueva tarea">
+    <button class="primario" type="submit">Agregar tarea</button>
+  </form>
+
+  <p class="mensaje error" id="error" hidden></p>
+  <ul id="lista"></ul>
+  <p class="vacio" id="vacio" hidden>No hay tareas todavía. Agrega la primera arriba.</p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+function mostrarError(msg) { $('error').textContent = msg; $('error').hidden = !msg; }
+
+async function api(url, opciones) {
+  const r = await fetch(url, opciones);
+  if (!r.ok) {
+    const cuerpo = await r.json().catch(() => ({}));
+    throw new Error(cuerpo.error || `Error ${r.status}`);
+  }
+  return r.status === 204 ? null : r.json();
+}
+
+async function cargarInfo() {
+  try {
+    const d = await api('/api/info');
+    $('i-host').textContent = d.hostname;
+    $('i-alm').textContent = d.almacenamiento;
+    $('i-node').textContent = d.node;
+    $('i-via').textContent = d.cabeceras_proxy['x-forwarded-for']
+      ? 'proxy inverso (Nginx)' : 'conexión directa a Node.js';
+  } catch { $('i-host').textContent = 'no disponible'; }
+}
+
+function pintar(tareas) {
+  const ul = $('lista');
+  ul.replaceChildren();
+  $('vacio').hidden = tareas.length > 0;
+  for (const t of tareas) {
+    const li = document.createElement('li');
+    if (t.completada) li.className = 'hecha';
+
+    const chk = document.createElement('input');
+    chk.type = 'checkbox'; chk.checked = t.completada;
+    chk.setAttribute('aria-label', `Marcar "${t.titulo}"`);
+    chk.addEventListener('change', () => accion(() => api(`/api/tareas/${t.id}`, { method: 'PATCH' })));
+
+    const txt = document.createElement('span');
+    txt.textContent = t.titulo; // textContent evita inyección de HTML
+
+    const del = document.createElement('button');
+    del.className = 'borrar'; del.textContent = 'Eliminar';
+    del.addEventListener('click', () => accion(() => api(`/api/tareas/${t.id}`, { method: 'DELETE' })));
+
+    li.append(chk, txt, del);
+    ul.append(li);
+  }
+}
+
+async function recargar() { pintar(await api('/api/tareas')); }
+
+async function accion(fn) {
+  try { mostrarError(''); await fn(); await recargar(); }
+  catch (e) { mostrarError(e.message); }
+}
+
+$('form').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const titulo = $('titulo').value.trim();
+  if (!titulo) return;
+  accion(async () => {
+    await api('/api/tareas', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ titulo }),
+    });
+    $('titulo').value = '';
+  });
+});
+
+cargarInfo();
+accion(async () => {});
+</script>
+</body>
+</html>
