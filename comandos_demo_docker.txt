@@ -1,0 +1,277 @@
+# ======================================================================
+# COMANDOS PARA LA DEMO - EJERCICIOS 4, 5 Y 6 (DOCKER)
+# Entorno: GitHub Codespaces (Docker ya instalado)
+# ======================================================================
+
+# COMO USARLO
+# - Copiar y pegar en orden, de arriba hacia abajo.
+# - Las lineas que empiezan con # son comentarios: se pueden pegar sin problema.
+# - Todo se ejecuta desde la RAIZ del proyecto (la terminal del Codespace
+#   ya abre ahi; comprobar con: ls).
+# - Los bloques con \ al final de linea son UN solo comando: pegar completos.
+# - Para ver la app en el navegador: pestana PUERTOS (junto a TERMINAL) ->
+#   icono del globo del puerto indicado (3000 u 8080).
+
+
+# ======================================================================
+# 0. ANTES DE EXPONER (hacerlo con calma, no durante la demo)
+# ======================================================================
+
+# Comprobar que estamos en la raiz del proyecto (debe verse index.js,
+# package.json y la carpeta public)
+ls
+
+# Guardar el usuario de Docker Hub en una variable (EN MINUSCULAS).
+# Cambiar tu_usuario por el usuario real. Si se abre otra terminal, repetir.
+export DH_USER=tu_usuario
+
+# Pre-descargar las imagenes para que la demo no espere descargas
+docker pull node:22-alpine
+docker pull postgres:15-alpine
+docker pull nginx:alpine
+docker pull alpine
+
+# Dejar todo limpio (los errores por "no existe" son normales)
+docker rm -f app_node web-app database nginx-proxy app_hub 2>/dev/null
+docker network rm red-tareas 2>/dev/null
+docker volume rm pgdata 2>/dev/null
+docker rmi app-tareas:v1 app-tareas:v2 2>/dev/null
+
+# OPCIONAL: borrar archivos de ensayos previos para crearlos en vivo
+rm -f Dockerfile .dockerignore
+rm -rf nginx
+
+# Tener el TOKEN de Docker Hub copiado y a mano (Ejercicio 6)
+
+# Confirmar que no hay contenedores corriendo
+docker ps
+
+
+# ======================================================================
+# EJERCICIO 4 - IMAGEN PROPIA CON DOCKERFILE
+# ======================================================================
+
+# 1. Crear .dockerignore: lo que NO se copia a la imagen
+cat > .dockerignore << 'EOF'
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+Dockerfile
+docker-compose.yml
+README.md
+EOF
+
+# 2. Crear el Dockerfile (la receta de la imagen)
+cat > Dockerfile << 'EOF'
+# Imagen base: Alpine Linux (liviano) con Node.js 22
+FROM node:22-alpine
+# Directorio de trabajo dentro del contenedor
+WORKDIR /usr/src/app
+# Se copian solo las dependencias primero (aprovecha la cache de capas)
+COPY package*.json ./
+# Se instalan las dependencias de produccion
+RUN npm install --omit=dev
+# Se copia el resto del codigo
+COPY . .
+# Documenta el puerto de la aplicacion
+EXPOSE 3000
+# Se ejecuta como usuario sin privilegios
+USER node
+# Comando que se ejecuta al iniciar el contenedor
+CMD ["node", "index.js"]
+EOF
+
+# 3. Construir la imagen (-t = nombre:etiqueta, el punto = contexto)
+docker build -t app-tareas:v1 .
+
+# 4. Ver la imagen creada
+docker images app-tareas
+
+# 5. Ejecutar un contenedor (-d segundo plano, -p publica el puerto)
+docker run -d --name app_node -p 3000:3000 app-tareas:v1
+
+# 6. Comprobar que esta en ejecucion (estado "Up")
+docker ps
+
+# 7. Ver los registros de la aplicacion (debe decir "almacenamiento: memoria")
+docker logs app_node
+
+# 8. Probar la aplicacion
+curl localhost:3000/health
+curl localhost:3000/api/info
+# En el navegador: pestana PUERTOS -> puerto 3000.
+# El "hostname" de la pagina es el ID del contenedor (igual que en docker ps).
+
+# 9. Entrar al contenedor (PEGAR UNA LINEA A LA VEZ)
+docker exec -it app_node sh
+ls
+whoami
+exit
+
+# 10. Cache de capas: cambiar un texto y reconstruir con otra etiqueta
+sed -i 's/Lista de tareas/Lista de tareas v2/' public/index.html
+docker build -t app-tareas:v2 .
+# Fijarse en las lineas "CACHED": no reinstala las dependencias.
+
+# 11. Ver las capas de la imagen
+docker history app-tareas:v2
+
+# 12. Revertir el cambio del texto (para no dejar el archivo modificado)
+sed -i 's/Lista de tareas v2/Lista de tareas/' public/index.html
+
+# 13. Limpieza (se conserva la imagen app-tareas:v1)
+docker stop app_node
+docker rm app_node
+
+
+# ======================================================================
+# EJERCICIO 5 - TRES CONTENEDORES EN UNA RED PRIVADA
+# ======================================================================
+
+# 1. Crear la red privada (bridge, con DNS interno)
+docker network create red-tareas
+docker network ls
+
+# 2. Contenedor 1: PostgreSQL (SIN -p: no se puede acceder desde fuera)
+docker run -d --name database --network red-tareas \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=appdb -v pgdata:/var/lib/postgresql/data \
+  postgres:15-alpine
+
+# 3. Contenedor 2: la aplicacion (DB_HOST=database = nombre del contenedor)
+docker run -d --name web-app --network red-tareas \
+  -e DB_HOST=database -e DB_USER=postgres \
+  -e DB_PASSWORD=secret -e DB_NAME=appdb \
+  app-tareas:v1
+
+# 4. Comprobar la conexion (debe decir "almacenamiento: postgresql";
+#    al inicio puede mostrar reintentos mientras la base arranca)
+docker logs web-app
+
+# 5. Crear la configuracion de Nginx (proxy inverso hacia web-app)
+mkdir -p nginx
+cat > nginx/default.conf << 'EOF'
+server {
+    listen 80;
+    server_name localhost;
+    location / {
+        proxy_pass http://web-app:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+# 6. Validar la sintaxis (debe terminar con "syntax is ok")
+docker run --rm --network red-tareas \
+  -v "$(pwd)/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro" \
+  nginx:alpine nginx -t
+
+# 7. Contenedor 3: Nginx (unico con puerto publicado: 8080 -> 80)
+docker run -d --name nginx-proxy --network red-tareas -p 8080:80 \
+  -v "$(pwd)/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro" \
+  nginx:alpine
+
+# 8. Ver los tres contenedores (solo nginx-proxy muestra puerto publicado)
+docker ps
+
+# 9. En el navegador: pestana PUERTOS -> puerto 8080.
+#    La barra negra debe decir "proxy inverso (Nginx)".
+#    Agregar una tarea para la prueba de persistencia.
+
+# 10. VERIFICAR AISLAMIENTO Y DNS INTERNO
+# La app NO publica puerto: debe fallar
+curl -s -m 3 localhost:3000/health || echo "inaccesible (correcto)"
+# A traves de Nginx SI responde
+curl -s localhost:8080/health
+# La app resuelve el nombre "database" con el DNS interno
+docker exec web-app nslookup database
+# Nginx alcanza a la app por nombre
+docker exec nginx-proxy wget -qO- http://web-app:3000/health
+# Un contenedor FUERA de la red no resuelve el nombre (debe fallar)
+docker run --rm alpine ping -c 1 database
+
+# 11. Ver los datos guardados en la base
+docker exec -it database psql -U postgres -d appdb -c "SELECT * FROM tareas;"
+
+# 12. Persistencia: borrar la base y recrearla con el MISMO volumen
+docker rm -f database
+docker run -d --name database --network red-tareas \
+  -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=secret \
+  -e POSTGRES_DB=appdb -v pgdata:/var/lib/postgresql/data \
+  postgres:15-alpine
+docker restart web-app
+# Recargar la pagina (8080): las tareas siguen ahi.
+
+# 13. Limpieza (el volumen pgdata y las imagenes se conservan)
+docker rm -f nginx-proxy web-app database
+docker network rm red-tareas
+
+
+# ======================================================================
+# EJERCICIO 6 - PUBLICAR EN DOCKER HUB
+# ======================================================================
+
+# (Si se abrio otra terminal, repetir: export DH_USER=tu_usuario)
+
+# 1. Iniciar sesion. Cuando pida Password, pegar el TOKEN (no se ve).
+docker login -u $DH_USER
+
+# 2. Etiquetar la imagen: usuario/repositorio:etiqueta
+docker tag app-tareas:v1 $DH_USER/app-tareas:1.0.0
+docker tag app-tareas:v1 $DH_USER/app-tareas:latest
+
+# 3. Ver las etiquetas (mismo IMAGE ID: son nombres de la misma imagen)
+docker images $DH_USER/app-tareas
+
+# 4. Subir la imagen (la 2.a subida es casi instantanea: capas repetidas)
+docker push $DH_USER/app-tareas:1.0.0
+docker push $DH_USER/app-tareas:latest
+
+# 5. Verificar en el navegador (el repositorio debe ser PUBLICO):
+#    https://hub.docker.com/r/TU_USUARIO/app-tareas
+
+# 6. Simular a un companero: borrar TODAS las copias locales
+docker rmi $DH_USER/app-tareas:1.0.0 $DH_USER/app-tareas:latest \
+  app-tareas:v1 app-tareas:v2
+docker images app-tareas
+
+# 7. Descargar desde cero y ejecutar
+docker pull $DH_USER/app-tareas:1.0.0
+docker run -d --name app_hub -p 3000:3000 $DH_USER/app-tareas:1.0.0
+
+# 8. Comprobar (y en el navegador: pestana PUERTOS -> puerto 3000)
+curl localhost:3000/health
+
+# 9. Limpieza final
+docker rm -f app_hub
+docker logout
+
+
+# ======================================================================
+# SI ALGO FALLA (rapido)
+# ======================================================================
+
+# Ver todos los contenedores, incluso los detenidos
+docker ps -a
+
+# "container name ... is already in use"
+docker rm -f NOMBRE_DEL_CONTENEDOR
+
+# "port is already allocated": algo usa ese puerto
+docker ps
+
+# Nginx se cae o da 502: ver el motivo
+docker logs nginx-proxy
+docker logs web-app
+
+# La app aborta con "password authentication failed": el volumen guarda
+# otra contrasena. Borrarlo (BORRA LOS DATOS) y recrear la base.
+docker rm -f database
+docker volume rm pgdata
+
+# Ver quien esta en la red y su IP
+docker network inspect red-tareas --format '{{range .Containers}}{{.Name}} -> {{.IPv4Address}}{{"\n"}}{{end}}'
